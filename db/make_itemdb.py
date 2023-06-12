@@ -22,4 +22,3 @@ with open("items.db", "w") as f:
     f.write(create_table)
 
 conn.close()
-
