@@ -1,12 +1,15 @@
 import os
 import logging
 import pathlib
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import hashlib
 from typing import Optional
+import sqlite3
+
+DATABASE="../db/mercari.sqlite3"
 
 app = FastAPI()
 logger = logging.getLogger("uvicorn")
@@ -39,9 +42,6 @@ def add_item(name: str = Form(...), category: str = Form(None),image: Optional[s
     if not os.path.exists(image_folder):
         os.makedirs(image_folder)
 
-
-
-
     with open(image, 'rb') as imagefile:
         content = imagefile.read()
     hash_value = hashlib.sha256(content).hexdigest()
@@ -49,38 +49,69 @@ def add_item(name: str = Form(...), category: str = Form(None),image: Optional[s
     with open(os.path.join(image_folder, file_name), 'wb') as f:
         f.write(content)
 
-    new_item = {
-        "name": name,
-        "category": category,
-        "image_filename": f"{hash_value}.jpg"
-    }
-    data["items"].append(new_item)
 
-    with open('items.json', 'w') as outputf:
-        json.dump(data, outputf, indent=4)
+    with sqlite3.connect(DATABASE) as conn:
+        cursor = conn.cursor()
+
+        # カテゴリ名に基づいてカテゴリIDを取得する
+        cursor.execute("SELECT id FROM category WHERE name=?", (category,))
+        result = cursor.fetchone()
+        if result is None:
+            category_id =cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO category (id, name) VALUES (?, ?)",
+                (category_id, category)
+            )
+        else:
+            category_id = result[0]
 
 
-    logger.info(f"Receive item: {name}")
-    return {"message": f"item received: {name}"}
+        cursor.execute(
+            "INSERT INTO items (name, category_id, image_name) VALUES (?, ?, ?)",
+            (name, category_id, f"{hash_value}.jpg")
+        )
+        conn.commit()
+        item_id = cursor.lastrowid
+        return {"message": "Item added successfully", "item_id": item_id}
+
 
 @app.get("/items")
 def get_item_list():
-    try:
-        with open('items.json', 'r') as f:
-            data = json.load(f) #data: dict
-    except FileNotFoundError:
-        data = {"items": []}
-    return data
+
+    with sqlite3.connect(DATABASE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT items.id, items.name, category.name, items.image_name FROM items JOIN category ON items.category_id = category.id")
+        items = cursor.fetchall()
+        if items is None:
+            raise HTTPException(status_code=404, detail="Item not found")
+        items_with_category = [{"id": item[0], "name": item[1], "category": item[2], "image_filename": item[3]} for item in items]
+        return {"items": items_with_category}
+
+
+
 
 @app.get("/items/{item_id}")
 def get_item(item_id: int):
-    try:
-        with open('items.json', 'r') as f:
-            data = json.load(f) #data: dict
-    except FileNotFoundError:
-        data = {"items": []}
-    return data["items"][item_id]
 
+    with sqlite3.connect(DATABASE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT items.id, items.name, category.name, items.image_name FROM items JOIN category ON items.category_id = category.id WHERE items.id=?", (item_id,))
+        item = cursor.fetchone()
+        if item is None:
+            raise HTTPException(status_code=404, detail="Item not found")
+        item_with_category = {"id": item[0], "name": item[1], "category": item[2], "image_filename": item[3]}
+        return {"item": item_with_category}
+
+@app.get("/search")
+def search(keyword: str = Query(...)):
+    with sqlite3.connect(DATABASE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT items.id, items.name, category.name, items.image_name FROM items JOIN category ON items.category_id = category.id WHERE items.name LIKE ?", (f"%{keyword}%",))
+        items = cursor.fetchall()
+        if items is None:
+            raise HTTPException(status_code=404, detail="Item not found")
+        items_with_category = [{"id": item[0], "name": item[1], "category": item[2], "image_filename": item[3]} for item in items]
+        return {"items": items_with_category}
 
 
 @app.get("/image/{image_filename}")
